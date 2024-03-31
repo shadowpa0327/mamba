@@ -56,8 +56,7 @@ class Mamba(nn.Module):
         self.expand = expand
         self.d_inner = int(self.expand * self.d_model)
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
-        #self.use_fast_path = use_fast_path
-        self.use_fast_path = False
+        self.use_fast_path = use_fast_path
         self.layer_idx = layer_idx
 
         self.in_proj = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
@@ -187,7 +186,7 @@ class Mamba(nn.Module):
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             assert self.activation in ["silu", "swish"]
-            y = selective_scan_ref(
+            y = selective_scan_fn(
                 x,
                 dt,
                 A,
