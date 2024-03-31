@@ -10,7 +10,7 @@ from torch import Tensor
 
 from einops import rearrange, repeat
 
-from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn, selective_scan_ref
 
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -23,7 +23,7 @@ except ImportError:
     selective_state_update = None
 
 try:
-    from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
+    from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn, rms_norm_ref
 except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
@@ -56,7 +56,8 @@ class Mamba(nn.Module):
         self.expand = expand
         self.d_inner = int(self.expand * self.d_model)
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
-        self.use_fast_path = use_fast_path
+        #self.use_fast_path = use_fast_path
+        self.use_fast_path = False
         self.layer_idx = layer_idx
 
         self.in_proj = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
@@ -186,7 +187,7 @@ class Mamba(nn.Module):
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             assert self.activation in ["silu", "swish"]
-            y = selective_scan_fn(
+            y = selective_scan_ref(
                 x,
                 dt,
                 A,
@@ -336,16 +337,31 @@ class Block(nn.Module):
             if self.residual_in_fp32:
                 residual = residual.to(torch.float32)
         else:
-            fused_add_norm_fn = rms_norm_fn if isinstance(self.norm, RMSNorm) else layer_norm_fn
+            # fused_add_norm_fn = rms_norm_fn if isinstance(self.norm, RMSNorm) else layer_norm_fn
+            # hidden_states, residual = fused_add_norm_fn(
+            #     hidden_states,
+            #     self.norm.weight,
+            #     self.norm.bias,
+            #     residual=residual,
+            #     prenorm=True,
+            #     residual_in_fp32=self.residual_in_fp32,
+            #     eps=self.norm.eps,
+            # )
+            #NOTE(brian1009) The Triton implementation of RMSNorm will lead to the non-deterministic inference result
+            # For reproducibility purpose, we use the pytorch implementation for experiments.
+            assert isinstance(self.norm, RMSNorm), "Only support RMSNorm now"
+            fused_add_norm_fn  = rms_norm_ref
             hidden_states, residual = fused_add_norm_fn(
                 hidden_states,
                 self.norm.weight,
                 self.norm.bias,
                 residual=residual,
                 prenorm=True,
-                residual_in_fp32=self.residual_in_fp32,
+                upcast=True,
                 eps=self.norm.eps,
             )
+            
+            
         hidden_states = self.mixer(hidden_states, inference_params=inference_params)
         return hidden_states, residual
 
