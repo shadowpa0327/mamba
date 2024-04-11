@@ -187,7 +187,7 @@ class Mamba(nn.Module):
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             assert self.activation in ["silu", "swish"]
-            y = selective_scan_ref(
+            y = selective_scan_fn(
                 x,
                 dt,
                 A,
@@ -337,6 +337,10 @@ class Block(nn.Module):
             if self.residual_in_fp32:
                 residual = residual.to(torch.float32)
         else:
+            # use class implementaion to accommodate our fusedNorm
+            hidden_states, residual = self.norm(
+                hidden_states, residual=residual, prenorm=True, residual_in_fp32=self.residual_in_fp32
+            )
             # fused_add_norm_fn = rms_norm_fn if isinstance(self.norm, RMSNorm) else layer_norm_fn
             # hidden_states, residual = fused_add_norm_fn(
             #     hidden_states,
@@ -347,19 +351,19 @@ class Block(nn.Module):
             #     residual_in_fp32=self.residual_in_fp32,
             #     eps=self.norm.eps,
             # )
-            #NOTE(brian1009) The Triton implementation of RMSNorm will lead to the non-deterministic inference result
-            # For reproducibility purpose, we use the pytorch implementation for experiments.
-            assert isinstance(self.norm, RMSNorm), "Only support RMSNorm now"
-            fused_add_norm_fn  = rms_norm_ref
-            hidden_states, residual = fused_add_norm_fn(
-                hidden_states,
-                self.norm.weight,
-                self.norm.bias,
-                residual=residual,
-                prenorm=True,
-                upcast=True,
-                eps=self.norm.eps,
-            )
+            # #NOTE(brian1009) The Triton implementation of RMSNorm will lead to the non-deterministic inference result
+            # # For reproducibility purpose, we use the pytorch implementation for experiments.
+            # assert isinstance(self.norm, RMSNorm), "Only support RMSNorm now"
+            # fused_add_norm_fn  = rms_norm_ref
+            # hidden_states, residual = fused_add_norm_fn(
+            #     hidden_states,
+            #     self.norm.weight,
+            #     self.norm.bias,
+            #     residual=residual,
+            #     prenorm=True,
+            #     upcast=True,
+            #     eps=self.norm.eps,
+            # )
             
             
         hidden_states = self.mixer(hidden_states, inference_params=inference_params)
