@@ -632,10 +632,16 @@ def ssd_chunk_scan_combined_ref(x, dt, A, B, C, chunk_size, D=None, z=None, dt_b
     Return:
         out: (batch, seqlen, nheads, headdim)
     """
+    savedtype = x.dtype
     batch, seqlen, nheads, headdim = x.shape
     dstate = B.shape[-1]
     if seqlen % chunk_size != 0:
         dt = F.pad(dt, (0, 0, 0, chunk_size - seqlen % chunk_size))
+        x = F.pad(x, (0, 0, 0, 0, 0, chunk_size - seqlen % chunk_size))
+        B = F.pad(B, (0, 0, 0, 0, 0, chunk_size - seqlen % chunk_size))
+        C = F.pad(C, (0, 0, 0, 0, 0, chunk_size - seqlen % chunk_size))
+        if z is not None:
+            z = F.pad(z, (0, 0, 0, 0, 0, chunk_size - seqlen % chunk_size))
     dt = rearrange(dt, "b (c l) h -> b h c l", l=chunk_size)
     dt = dt.float()  # We want high precision for this before cumsum
     if dt_bias is not None:
@@ -656,6 +662,9 @@ def ssd_chunk_scan_combined_ref(x, dt, A, B, C, chunk_size, D=None, z=None, dt_b
     states = states.to(states_dtype)
     # 3. Compute the output for each chunk
     out = chunk_scan_ref(B, C, x, dt, dA_cumsum, states, D=D, z=z)
+    out = out.to(savedtype)
+    if seqlen % chunk_size != 0:
+        out = out[:, :seqlen, ...]
     return out
 
 

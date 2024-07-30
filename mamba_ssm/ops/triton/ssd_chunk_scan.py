@@ -1803,7 +1803,7 @@ def chunk_scan_ref(B, C, x, dt, dA_cumsum, prev_states, D=None, z=None):
     _, _, ngroups, dstate = B.shape
     assert B.shape == (batch, seqlen, ngroups, dstate)
     _, _, nchunks, chunk_size = dt.shape
-    assert seqlen == nchunks * chunk_size
+    assert seqlen == nchunks * chunk_size, f"{seqlen} != {nchunks} * {chunk_size}"
     assert C.shape == B.shape
     B = repeat(B, "b l g d -> b l (g h) d", h=nheads // ngroups)
     C = repeat(C, "b l g d -> b l (g h) d", h=nheads // ngroups)
