@@ -28,14 +28,14 @@ from mamba_ssm.ops.triton.ssd_bmm import _bmm_chunk_fwd, _bmm_chunk_bwd
 from mamba_ssm.ops.triton.ssd_chunk_state import _chunk_cumsum_fwd, _chunk_cumsum_bwd
 from mamba_ssm.ops.triton.ssd_chunk_state import _chunk_state_fwd, _chunk_state_bwd_db
 from mamba_ssm.ops.triton.ssd_chunk_state import _chunk_state_bwd_ddAcs_stable
-from mamba_ssm.ops.triton.ssd_chunk_state import chunk_state, chunk_state_ref
+from mamba_ssm.ops.triton.ssd_chunk_state import chunk_state, chunk_state_ref, my_chunk_state_ref
 from mamba_ssm.ops.triton.ssd_chunk_state import chunk_state_varlen
 from mamba_ssm.ops.triton.ssd_state_passing import _state_passing_fwd, _state_passing_bwd
 from mamba_ssm.ops.triton.ssd_state_passing import state_passing, state_passing_ref
 from mamba_ssm.ops.triton.ssd_chunk_scan import _chunk_scan_fwd, _chunk_scan_bwd_dz, _chunk_scan_bwd_dstates
 from mamba_ssm.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_dC, _chunk_scan_bwd_dcb
 from mamba_ssm.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_ddAcs_stable
-from mamba_ssm.ops.triton.ssd_chunk_scan import chunk_scan, chunk_scan_ref
+from mamba_ssm.ops.triton.ssd_chunk_scan import chunk_scan, chunk_scan_ref, my_chunk_scan_ref
 from mamba_ssm.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_ddAcs_prev
 from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn, _layer_norm_fwd, _layer_norm_bwd
 from mamba_ssm.ops.triton.k_activations import _swiglu_fwd, _swiglu_bwd
@@ -662,6 +662,56 @@ def ssd_chunk_scan_combined_ref(x, dt, A, B, C, chunk_size, D=None, z=None, dt_b
     states = states.to(states_dtype)
     # 3. Compute the output for each chunk
     out = chunk_scan_ref(B, C, x, dt, dA_cumsum, states, D=D, z=z)
+    out = out.to(savedtype)
+    if seqlen % chunk_size != 0:
+        out = out[:, :seqlen, ...]
+    return out
+
+
+def my_ssd_chunk_scan_combined_ref(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, dt_softplus=False, indices=None):
+    """
+    Argument:
+        x: (batch, seqlen, nheads, headdim)
+        dt: (batch, seqlen, nheads)
+        A: (nheads)
+        B: (batch, seqlen, ngroups, dstate)
+        C: (batch, seqlen, ngroups, dstate)
+        D: (nheads, headdim) or (nheads,)
+        z: (batch, seqlen, nheads, headdim)
+        dt_bias: (nheads,)
+    Return:
+        out: (batch, seqlen, nheads, headdim)
+    """
+    savedtype = x.dtype
+    batch, seqlen, nheads, headdim = x.shape
+    dstate = B.shape[-1]
+    if seqlen % chunk_size != 0:
+        dt = F.pad(dt, (0, 0, 0, chunk_size - seqlen % chunk_size))
+        x = F.pad(x, (0, 0, 0, 0, 0, chunk_size - seqlen % chunk_size))
+        B = F.pad(B, (0, 0, 0, 0, 0, chunk_size - seqlen % chunk_size))
+        C = F.pad(C, (0, 0, 0, 0, 0, chunk_size - seqlen % chunk_size))
+        if z is not None:
+            z = F.pad(z, (0, 0, 0, 0, 0, chunk_size - seqlen % chunk_size))
+    dt = rearrange(dt, "b (c l) h -> b h c l", l=chunk_size)
+    dt = dt.float()  # We want high precision for this before cumsum
+    if dt_bias is not None:
+        dt = dt + rearrange(dt_bias, "h -> h 1 1")
+    if dt_softplus:
+        dt = F.softplus(dt)
+    dA = dt * rearrange(A, "h -> h 1 1")
+    dA_cumsum = torch.cumsum(dA, dim=-1)
+    # 1. Compute the state for each chunk
+    states = my_chunk_state_ref(B, x, dt, dA_cumsum, indices=indices)
+    states_dtype = states.dtype
+    if states.dtype not in [torch.float32, torch.float64]:
+        states = states.to(torch.float32)
+    # 2. Pass the state to all the chunks by weighted cumsum.
+    # state_passing_ref is much less numerically stable
+    states = rearrange(state_passing_ref(rearrange(states, "... p n -> ... (p n)"), dA_cumsum[:, :, :, -1])[0],
+                       "... (p n) -> ... p n", n=dstate)
+    states = states.to(states_dtype)
+    # 3. Compute the output for each chunk
+    out = my_chunk_scan_ref(B, C, x, dt, dA_cumsum, states, D=D, z=z, indices=indices)
     out = out.to(savedtype)
     if seqlen % chunk_size != 0:
         out = out[:, :seqlen, ...]

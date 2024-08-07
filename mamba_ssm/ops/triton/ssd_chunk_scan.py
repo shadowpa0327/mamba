@@ -1827,3 +1827,78 @@ def chunk_scan_ref(B, C, x, dt, dA_cumsum, prev_states, D=None, z=None):
             D = rearrange(D, "h -> h 1")
         out = out + x * D
     return out if z is None else out * F.silu(z)
+
+
+def my_chunk_scan_ref(B, C, x, dt, dA_cumsum, prev_states, D=None, z=None, indices=None):
+    """
+    Argument:
+        B: (batch, seqlen, ngroups, dstate)
+        C: (batch, seqlen, ngroups, dstate)
+        x: (batch, seqlen, nheads, headdim)
+        dt: (batch, nheads, nchunks, chunk_size)
+        dA_cumsum: (batch, nheads, nchunks, chunk_size)
+        prev_states: (batch, nchunks, nheads, headdim, dstate)
+        D: (nheads, headdim) or (nheads,)
+        z: (batch, seqlen, nheads, headdim)
+    Return:
+        out: (batch, seqlen, nheads, headdim)
+    """
+    batch, seqlen, nheads, headdim = x.shape
+    _, _, ngroups, dstate = B.shape
+    assert B.shape == (batch, seqlen, ngroups, dstate)
+    _, _, nchunks, chunk_size = dt.shape
+    assert seqlen == nchunks * chunk_size
+    assert C.shape == B.shape
+    B = repeat(B, "b l g d -> b l (g h) d", h=nheads // ngroups)
+    C = repeat(C, "b l g d -> b l (g h) d", h=nheads // ngroups)
+    CB = torch.einsum("bclhd,bcshd->bchls", rearrange(C, "b (c l) h d -> b c l h d", c=nchunks),
+                      rearrange(B, "b (c s) h d -> b c s h d", c=nchunks))
+    # (batch, nheads, nchunks, chunksize, chunksize)
+    # print("dA_cumsum.shape: ", dA_cumsum.shape)
+    dt_segment_sum = dA_cumsum[:, :, :, :, None] - dA_cumsum[:, :, :, None, :]
+    decay = torch.exp(dt_segment_sum)
+    # print("CB.shape: ", CB.shape, ", decay.shape: ", decay.shape)
+    scores_decay = CB * rearrange(decay, "b h c l s -> b c h l s")
+    causal_mask = torch.tril(torch.ones(chunk_size, chunk_size, device=x.device, dtype=bool), diagonal=0)
+    scores_decay = scores_decay.masked_fill(~causal_mask, 0)
+    # print("scores_decay.shape: ", scores_decay.shape)
+    if indices is not None:
+        scores_decay = rearrange(scores_decay, "b c h l s -> b c s l h")
+        scores_decay = repeat(scores_decay, "b c s l h -> b c s l h p", p=64)
+        scores_decay = rearrange(scores_decay, "b c s l h p -> b c s l (h p)")
+        scores_decay = scores_decay[..., indices]
+        scores_decay = rearrange(scores_decay, "b c s l (h p) -> b c h l s p", p=64)
+
+        dt = rearrange(dt, "b h c s -> b c s h")
+        dt = repeat(dt, "b c s h -> b c s h p", p=64)
+        dt = rearrange(dt, "b c s h p -> b c s (h p)")
+        dt = dt[..., indices]
+        dt = rearrange(dt, "b c s (h p) -> b h c s p", p=64)
+        out = torch.einsum('bchlsp,bhcsp,bcshp->bclhp',
+                        scores_decay.to(x.dtype),
+                        dt.to(x.dtype),
+                        rearrange(x, "b (c s) h p -> b c s h p", c=nchunks))
+    else:
+        out = torch.einsum('bchls,bhcs,bcshp->bclhp',
+                        scores_decay.to(x.dtype),
+                        dt.to(x.dtype),
+                        rearrange(x, "b (c s) h p -> b c s h p", c=nchunks))
+    state_decay_out = torch.exp(rearrange(dA_cumsum, "b h c l -> b c l h 1"))
+    out_prev = torch.einsum('bclhn,bchpn->bclhp', rearrange(C, "b (c l) h n -> b c l h n", c=nchunks),
+                            prev_states.to(C.dtype)) * state_decay_out
+    out = out + out_prev
+    out = rearrange(out, "b c l h p -> b (c l) h p")
+
+    if D is not None:
+        if indices is not None:
+            assert D.dim() == 1
+            D = repeat(D, "h -> h p", p=64)
+            D = rearrange(D, "h p -> (h p)")
+            D = D[..., indices]
+            D = rearrange(D, "(h p) -> h p", p=64)
+            out = out + x * D
+        else:
+            if D.dim() == 1:
+                D = rearrange(D, "h -> h 1")
+            out = out + x * D
+    return out if z is None else out * F.silu(z)

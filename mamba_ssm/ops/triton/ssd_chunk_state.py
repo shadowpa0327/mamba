@@ -986,3 +986,54 @@ def chunk_state_ref(B, x, dt, dA_cumsum):
     B = rearrange(B, "b (c l) ... -> b c l ...", l=chunk_size)
     decay_states = torch.exp((dA_cumsum[:, :, :, -1:] - dA_cumsum))
     return torch.einsum("bclhn,bhcl,bhcl,bclhp->bchpn", B.to(x.dtype), decay_states.to(x.dtype), dt.to(x.dtype), x)
+
+
+
+def my_chunk_state_ref(B, x, dt, dA_cumsum, indices=None):
+    """
+    Argument:
+        B: (batch, seqlen, ngroups, headdim)
+        x: (batch, seqlen, nheads, headdim)
+        dt: (batch, nheads, nchunks, chunk_size)
+        dA_cumsum: (batch, nheads, nchunks, chunk_size)
+    Return:
+        states: (batch, nchunks, nheads, headdim, dstate)
+    """
+    # Check constraints.
+    batch, seqlen, nheads, headdim = x.shape
+    dstate = B.shape[-1]
+    _, _, nchunks, chunk_size = dt.shape
+    assert seqlen <= nchunks * chunk_size
+    assert x.shape == (batch, seqlen, nheads, headdim)
+    assert dt.shape == (batch, nheads, nchunks, chunk_size)
+    ngroups = B.shape[2]
+    assert nheads % ngroups == 0
+    assert B.shape == (batch, seqlen, ngroups, dstate)
+    B = repeat(B, "b l g d -> b l (g h) d", h=nheads // ngroups)
+    assert dA_cumsum.shape == (batch, nheads, nchunks, chunk_size)
+    if seqlen < nchunks * chunk_size:
+        x = F.pad(x, (0, 0, 0, 0, 0, nchunks * chunk_size - seqlen))
+        B = F.pad(B, (0, 0, 0, 0, 0, nchunks * chunk_size - seqlen))
+    x = rearrange(x, "b (c l) h p -> b c l h p", l=chunk_size)
+    B = rearrange(B, "b (c l) ... -> b c l ...", l=chunk_size)
+    decay_states = torch.exp((dA_cumsum[:, :, :, -1:] - dA_cumsum))
+
+    # print("decay_states.shape: ", decay_states.shape, decay_states.dtype)
+    if indices is not None:
+        decay_states = rearrange(decay_states, "b h c l -> b c l h")
+        decay_states = repeat(decay_states, "b c l h -> b c l h p", p=64)
+        decay_states = rearrange(decay_states, "b c l h p -> b c l (h p)")
+        decay_states = decay_states[..., indices]
+        decay_states = rearrange(decay_states, "b c l (h p) -> b c l h p", p=64)
+
+        dt = rearrange(dt, "b h c l -> b c l h")
+        dt = repeat(dt, "b c l h -> b c l h p", p=64)
+        dt = rearrange(dt, "b c l h p -> b c l (h p)")
+        dt = dt[..., indices]
+        dt = rearrange(dt, "b c l (h p) -> b c l h p", p=64)
+        # print("B.shape: ", B.shape, ", decay_states.shape: ", decay_states.shape, ", dt.shape: ", dt.shape, ", x.shape: ", x.shape)
+        return torch.einsum("bclhn,bclhp,bclhp,bclhp->bchpn", B.to(x.dtype), decay_states.to(x.dtype), dt.to(x.dtype), x)
+    else:
+        # print("B.shape: ", B.shape, ", decay_states.shape: ", decay_states.shape, ", x.shape: ", x.shape)
+        return torch.einsum("bclhn,bhcl,bhcl,bclhp->bchpn", B.to(x.dtype), decay_states.to(x.dtype), dt.to(x.dtype), x)
+
