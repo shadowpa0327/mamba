@@ -131,6 +131,7 @@ def decode(
     teacher_outputs=None,
     vocab_size=None,
     cg=False,
+    cg_dtype=None,
     enable_timing=False,
     streamer: Optional[TextStreamer] = None
 ):
@@ -163,6 +164,7 @@ def decode(
             batch_size,
             seqlen_og,
             max_length,
+            dtype=cg_dtype,
         )
         inference_params = model._decoding_cache.inference_params
         inference_params.reset(max_length, batch_size)
