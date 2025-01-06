@@ -35,9 +35,10 @@ class Block(nn.Module):
             self.mlp = None
         if self.fused_add_norm:
             assert RMSNorm is not None, "RMSNorm import fails"
-            assert isinstance(
-                self.norm, (nn.LayerNorm, RMSNorm)
-            ), "Only LayerNorm and RMSNorm are supported for fused_add_norm"
+            # We need to comment this out because we will use our quantized norm layers
+            # assert isinstance(
+            #     self.norm, (nn.LayerNorm, RMSNorm)
+            # ), "Only LayerNorm and RMSNorm are supported for fused_add_norm"
 
     def forward(
             self, hidden_states: Tensor, residual: Optional[Tensor] = None, inference_params=None, **mixer_kwargs
