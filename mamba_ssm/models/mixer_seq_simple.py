@@ -198,17 +198,26 @@ class MixerModel(nn.Module):
             residual = (hidden_states + residual) if residual is not None else hidden_states
             hidden_states = self.norm_f(residual.to(dtype=self.norm_f.weight.dtype))
         else:
-            # Set prenorm=False here since we don't need the residual
-            hidden_states = layer_norm_fn(
+            # use class implementaion to accommodate our fusedNorm
+            # it calls the same kernel function layer_norm_fn
+            # if using RMSNorm, which is the default in Mamba
+            hidden_states = self.norm_f(
                 hidden_states,
-                self.norm_f.weight,
-                self.norm_f.bias,
-                eps=self.norm_f.eps,
                 residual=residual,
                 prenorm=False,
-                residual_in_fp32=self.residual_in_fp32,
-                is_rms_norm=isinstance(self.norm_f, RMSNorm)
+                residual_in_fp32=self.residual_in_fp32
             )
+            # # Set prenorm=False here since we don't need the residual
+            # hidden_states = layer_norm_fn(
+            #     hidden_states,
+            #     self.norm_f.weight,
+            #     self.norm_f.bias,
+            #     eps=self.norm_f.eps,
+            #     residual=residual,
+            #     prenorm=False,
+            #     residual_in_fp32=self.residual_in_fp32,
+            #     is_rms_norm=isinstance(self.norm_f, RMSNorm)
+            # )
         return hidden_states
 
 
